@@ -33,6 +33,7 @@ MAT_LABELS = {1: "Initial", 2: "Répété", 3: "Défini", 4: "Géré", 5: "Optim
 NB_CHEMINS_OPTIONS = [5, 7, 10, 12, 15]
 BATCH_SIZE = 4  # chemins traités par appel, pour éviter les réponses JSON tronquées
 STATUS_LABELS = {"pending": "🟡 En attente", "validated": "🟢 Validé", "rejected": "🔴 Rejeté"}
+AUTRE = "Autre (saisie libre)…"  # option permettant au consultant de saisir sa propre SR ou son propre OV
 
 defaults = {
     "step": 1,
@@ -91,6 +92,24 @@ Parties prenantes de l'écosystème: {m['prestataires'] or '?'}
 Projets récents: {m['projets_recents'] or '?'}
 Maturité SSI (indicateur complémentaire, hors EBIOS RM): {mat_str}
 Notes consultant: {m['notes'] or 'Aucune'}"""
+
+
+def choix_ou_saisie(container, label: str, options: list[str], current: str, key: str) -> str:
+    """Liste déroulante avec une option « Autre » qui ouvre un champ de saisie libre.
+
+    Une valeur hors liste (saisie par le consultant ou proposée par le modèle) s'affiche
+    automatiquement en « Autre », avec son texte prérempli.
+    """
+    opts = options + [AUTRE]
+    hors_liste = current not in options
+    choix = container.selectbox(label, opts, index=opts.index(AUTRE) if hors_liste else opts.index(current), key=f"{key}_sel")
+    if choix != AUTRE:
+        return choix
+    libre = container.text_input(f"{label} — précisez", value=current if hors_liste else "", key=f"{key}_txt")
+    if not libre.strip():
+        container.caption("Saisissez une valeur : en attendant, la valeur précédente est conservée.")
+        return current
+    return libre.strip()
 
 
 def validated_paths() -> list[dict]:
@@ -476,10 +495,8 @@ elif st.session_state.step == 3:
             f"{p['gravite']}  ·  {STATUS_LABELS[status]}"
         ):
             c1, c2 = st.columns(2)
-            sr_opts = SOURCES_RISQUE if p["source_risque"] in SOURCES_RISQUE else [p["source_risque"]] + SOURCES_RISQUE
-            ov_opts = OBJECTIFS_VISES if p["objectif_vise"] in OBJECTIFS_VISES else [p["objectif_vise"]] + OBJECTIFS_VISES
-            p["source_risque"] = c1.selectbox("Source de risque", sr_opts, index=sr_opts.index(p["source_risque"]), key=f"sr_{pid}")
-            p["objectif_vise"] = c2.selectbox("Objectif visé", ov_opts, index=ov_opts.index(p["objectif_vise"]), key=f"ov_{pid}")
+            p["source_risque"] = choix_ou_saisie(c1, "Source de risque", SOURCES_RISQUE, p["source_risque"], key=f"sr_{pid}")
+            p["objectif_vise"] = choix_ou_saisie(c2, "Objectif visé", OBJECTIFS_VISES, p["objectif_vise"], key=f"ov_{pid}")
             p["partie_prenante"] = c1.text_input("Partie prenante de l'écosystème", p["partie_prenante"], key=f"pp_{pid}")
             p["valeur_metier"] = c2.text_input("Valeur métier", p["valeur_metier"], key=f"vm_{pid}")
             p["evenement_redoute"] = c1.text_input("Événement redouté", p["evenement_redoute"], key=f"er_{pid}")
@@ -509,8 +526,10 @@ elif st.session_state.step == 3:
     with st.expander("➕ Ajouter un chemin d'attaque manuellement"):
         with st.form("add_path", clear_on_submit=True):
             c1, c2 = st.columns(2)
-            f_sr = c1.selectbox("Source de risque", SOURCES_RISQUE)
-            f_ov = c2.selectbox("Objectif visé", OBJECTIFS_VISES)
+            f_sr = c1.selectbox("Source de risque", SOURCES_RISQUE + [AUTRE])
+            f_ov = c2.selectbox("Objectif visé", OBJECTIFS_VISES + [AUTRE])
+            f_sr_libre = c1.text_input("Si « Autre » : précisez la source de risque")
+            f_ov_libre = c2.text_input("Si « Autre » : précisez l'objectif visé")
             f_pp = c1.text_input("Partie prenante de l'écosystème", placeholder="ou « Aucune (attaque directe) »")
             f_vm = c2.text_input("Valeur métier")
             f_er = c1.text_input("Événement redouté")
@@ -519,14 +538,18 @@ elif st.session_state.step == 3:
             f_rf = st.selectbox("Scénario de référence associé", ref_ids, format_func=lambda x: ref_lbl[x])
             submitted = st.form_submit_button("Ajouter et valider ce chemin")
         if submitted:
+            sr = f_sr_libre.strip() if f_sr == AUTRE else f_sr
+            ov = f_ov_libre.strip() if f_ov == AUTRE else f_ov
             new = validate_path({
-                "source_risque": f_sr, "objectif_vise": f_ov, "partie_prenante": f_pp,
+                "source_risque": sr, "objectif_vise": ov, "partie_prenante": f_pp,
                 "valeur_metier": f_vm, "evenement_redoute": f_er, "gravite": f_gr,
                 "chemin": f_ch, "ref_type": f_rf, "justification": "Ajouté par le consultant.",
             }, {r["id"] for r in refs})
             if new is None:
-                st.error("⚠ Tous les champs sont obligatoires.")
+                st.error("⚠ Tous les champs sont obligatoires (y compris la précision si vous avez choisi « Autre »).")
             else:
+                # La saisie libre du consultant est conservée telle quelle (pas de normalisation).
+                new["source_risque"], new["objectif_vise"] = sr, ov
                 new["id"] = f"CA-{len(paths) + 1:02d}"
                 paths.append(new)
                 pstatus[new["id"]] = "validated"
