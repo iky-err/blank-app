@@ -590,6 +590,32 @@ with st.sidebar:
             st.rerun()
 
 
+# ── Accès administrateur aux indicateurs (URL ?admin=1 + mot de passe) ─────
+# Invisible pour les consultants. Mot de passe dans les secrets Streamlit : ADMIN_PASSWORD = "..."
+
+if st.query_params.get("admin") == "1":
+    with st.sidebar:
+        st.divider()
+        st.subheader("🔒 Indicateurs (admin)")
+        mdp = st.text_input("Mot de passe", type="password", key="admin_mdp")
+        try:
+            attendu = st.secrets.get("ADMIN_PASSWORD", "")
+        except Exception:  # pas de fichier de secrets configuré
+            attendu = ""
+        if not attendu:
+            st.caption("Définissez ADMIN_PASSWORD dans les secrets de l'application.")
+        if mdp and attendu and mdp == attendu:
+            if os.path.exists(INDIC_FILE):
+                with open(INDIC_FILE, "rb") as f:
+                    st.download_button("⬇️ Télécharger indicateurs_ebios.csv", f.read(),
+                                       file_name="indicateurs_ebios.csv", mime="text/csv", width="stretch")
+                st.dataframe(pd.read_csv(INDIC_FILE), hide_index=True)
+            else:
+                st.info("Aucun indicateur enregistré depuis le dernier redémarrage de l'application.")
+        elif mdp:
+            st.error("Mot de passe incorrect.")
+
+
 # ── En-tête & progression ──────────────────────────────────────────────────
 
 st.title("🛡️ Formind — Outil consultant EBIOS RM")
