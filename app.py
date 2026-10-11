@@ -1,5 +1,4 @@
 import io
-import json
 import os
 import time
 import uuid
@@ -7,6 +6,8 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+from docx import Document
+from docx.shared import Pt, RGBColor
 
 from claude_client import call_claude_json
 from prompts import (
@@ -54,35 +55,77 @@ SCEN_EDITABLE = [
     "titre", "mode_operatoire", "actif", "vuln", "impact_op", "impact_fin",
     "impact_reg", "vraisemblance", "reco",
 ]
-STUDY_KEYS = [  # clés sauvegardées dans le fichier d'étude (.json)
-    "step", "nom", "secteur", "secteur_autre", "taille", "perimetre", "biens_supports",
-    "valeurs_metier", "evenements_redoutes", "sources_risque", "scenarios_ref", "scenarios_ref_autre",
-    "reglements", "reglement_autre", "incidents", "menaces", "equipe_it", "equipe_sec",
-    "prestataires", "projets_recents", "notes", "maturite", "nb_chemins", "analysis",
-    "paths", "path_status", "scenarios", "scen_status", "metrics",
-]
-
 # Indicateurs : enregistrés en arrière-plan, jamais affichés au consultant ni exportés au client.
 # Une ligne par étude, mise à jour à chaque action. Emplacement modifiable via la variable d'environnement.
 INDIC_FILE = os.environ.get(
     "EBIOS_INDICATEURS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "indicateurs_ebios.csv"))
 
-# Exemple FICTIF pour la prise en main (aucun client réel).
-EXEMPLE = {
-    "nom": "PayNova (exemple fictif)", "secteur": "Finance / Banque", "taille": "PME (50-500 sal.)",
-    "perimetre": "Activité d'émission de paiements mobiles et SI Finance associé, siège de Casablanca.",
-    "valeurs_metier": "Exécution des paiements clients ; gestion des comptes de paiement ; reporting réglementaire à Bank Al-Maghrib.",
-    "biens_supports": "Plateforme de paiement (cloud) → exécution des paiements ; base clients → gestion des comptes ; "
-                      "ERP Finance → reporting ; messagerie Microsoft 365 ; équipe trésorerie ; prestataire d'infogérance.",
-    "evenements_redoutes": "Détournement de fonds — Critique ; indisponibilité de la plateforme > 24 h — Grave ; "
-                           "fuite de données clients — Grave.",
-    "reglements": ["Loi 09-08 (CNDP)", "PCI-DSS", "ISO 27001"],
-    "equipe_it": "12", "equipe_sec": "2",
-    "prestataires": "Infogérant (administration des serveurs), éditeur de l'ERP, banque partenaire, agrégateur SMS.",
-    "projets_recents": "Migration de la plateforme vers le cloud (en cours).",
-    "incidents": "Tentative de fraude au président par e-mail en 2025, détectée par la trésorerie.",
-    "menaces": "Hausse des campagnes de phishing ciblant les fintechs de la région.",
-}
+# Exemple FICTIF de cadrage (aucun client réel), téléchargeable en Word comme modèle de saisie.
+# (libellé du champ dans l'outil, exemple de réponse, conseil de saisie)
+EXEMPLE = [
+    ("Nom de l'organisation *", "PayNova (exemple fictif)", "Nom du client tel qu'il apparaîtra dans l'export."),
+    ("Taille", "PME (50-500 sal.)", "Choisir dans la liste."),
+    ("Secteur d'activité", "Finance / Banque", "Choisir « Autre » et préciser si le secteur n'est pas listé."),
+    ("Périmètre de l'étude (métier et technique) *",
+     "Activité d'émission de paiements mobiles et SI Finance associé, siège de Casablanca.",
+     "Indiquer l'activité étudiée ET le SI concerné, avec les sites si utile."),
+    ("Valeurs métier",
+     "Exécution des paiements clients ; gestion des comptes de paiement ; reporting réglementaire à Bank Al-Maghrib.",
+     "Processus ou informations essentiels, séparés par des points-virgules."),
+    ("Biens supports",
+     "Plateforme de paiement (cloud) → exécution des paiements ; base clients → gestion des comptes ; "
+     "ERP Finance → reporting ; messagerie Microsoft 365 ; équipe trésorerie ; prestataire d'infogérance.",
+     "Format conseillé « bien support → valeur métier soutenue »."),
+    ("Événements redoutés (avec gravité si connue)",
+     "Détournement de fonds — Critique ; indisponibilité de la plateforme > 24 h — Grave ; fuite de données clients — Grave.",
+     "Ajouter la gravité (Mineure, Significative, Grave, Critique) : elle sera reprise dans les chemins."),
+    ("Sources de risque pressenties", "Cybercriminalité organisée ; Prestataire ou partenaire malveillant",
+     "Facultatif : laisser vide pour que l'IA propose elle-même les sources plausibles."),
+    ("Scénarios de référence à couvrir",
+     "Erreur de configuration (Finance) ; Usurpation d'identité à des fins de fraude ; Sabotage contractuel",
+     "Chaque scénario coché donnera au moins un chemin d'attaque."),
+    ("Référentiels et réglementations applicables", "Loi 09-08 (CNDP) ; PCI-DSS ; ISO 27001", "Cocher tous ceux qui s'appliquent."),
+    ("Effectif équipe IT / équipe sécurité", "12 / 2", "Nombre de personnes (internes et externes dédiées)."),
+    ("Parties prenantes de l'écosystème",
+     "Infogérant (administration des serveurs), éditeur de l'ERP, banque partenaire, agrégateur SMS.",
+     "Préciser leur rôle ou leurs accès : l'IA s'en sert comme vecteurs d'attaque."),
+    ("Projets SI en cours ou récents", "Migration de la plateforme vers le cloud (en cours).", ""),
+    ("Incidents de sécurité passés",
+     "Tentative de fraude au président par e-mail en 2025, détectée par la trésorerie.", "Écrire « Aucun » s'il n'y en a pas."),
+    ("État de la menace connu", "Hausse des campagnes de phishing ciblant les fintechs de la région.",
+     "Veille, alertes sectorielles, retours du client."),
+    ("Maturité SSI (5 curseurs, 1 à 5)", "Gouvernance 2 ; Risques 2 ; Protection technique 3 ; Incidents 2 ; Conformité 3",
+     "1 = Initial, 3 = Défini, 5 = Optimisé."),
+    ("Nombre de chemins d'attaque à proposer", "7", "Entre 5 et 15 ; au moins un par scénario de référence."),
+]
+
+
+def exemple_word() -> bytes:
+    """Fiche d'exemple de cadrage au format Word (modèle de saisie pour le consultant)."""
+    doc = Document()
+    doc.styles["Normal"].font.name = "Calibri"
+    doc.styles["Normal"].font.size = Pt(10)
+    doc.add_heading("Outil EBIOS RM — Exemple de cadrage (Atelier 1)", level=1)
+    p = doc.add_paragraph(
+        "Cet exemple est FICTIF. Il montre le niveau de détail attendu pour chaque champ de l'étape 1. "
+        "Saisissez dans l'outil les informations réelles de votre client : l'IA n'analyse que ce que vous saisissez."
+    )
+    p.runs[0].italic = True
+    doc.add_paragraph("Les champs marqués * sont obligatoires ; les autres améliorent fortement la qualité des propositions.")
+    t = doc.add_table(rows=1, cols=3)
+    t.style = "Light Grid Accent 1"
+    for cell, txt in zip(t.rows[0].cells, ("Champ de l'outil", "Exemple de réponse", "Conseil de saisie")):
+        cell.text = ""
+        cell.paragraphs[0].add_run(txt).bold = True
+    for champ, ex, conseil in EXEMPLE:
+        row = t.add_row().cells
+        row[0].text, row[1].text, row[2].text = champ, ex, conseil
+        row[0].paragraphs[0].runs[0].bold = True
+        if row[2].paragraphs[0].runs:
+            row[2].paragraphs[0].runs[0].font.color.rgb = RGBColor(0x59, 0x59, 0x59)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 def _new_metrics() -> dict:
@@ -145,22 +188,13 @@ def fmt_duree(sec) -> str:
     return f"{h} h {m:02d} min" if h else (f"{m} min {s:02d} s" if m else f"{s} s")
 
 
-def reset_state(data: dict | None = None) -> None:
-    """Vide la session (y compris les widgets) puis charge éventuellement une étude."""
+def reset_state() -> None:
+    """Vide la session (y compris les widgets) pour démarrer une nouvelle étude."""
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     for k, v in defaults.items():
         st.session_state[k] = v
     st.session_state["metrics"] = _new_metrics()
-    if data:
-        for k in STUDY_KEYS:
-            if k in data:
-                st.session_state[k] = data[k]
-        met = st.session_state["metrics"]
-        if met.get("duree_premiere_liste") is None:
-            # Le chrono d'une étude reprise ne compte pas le temps passé hors de l'outil.
-            met["t_debut"] = time.time()
-            met["chrono_reinitialise"] = True
 
 
 def call_ia(system: str, user: str):
@@ -178,7 +212,7 @@ def erreur_ia(e: Exception) -> None:
     st.error(
         f"La génération n'a pas abouti : {e}\n\n"
         "Vos saisies sont conservées. Relancez le bouton ; si l'erreur persiste, vérifiez la connexion "
-        "et la clé API (fichier de configuration), ou sauvegardez l'étude depuis la barre latérale."
+        "et la clé API (fichier de configuration)."
     )
 
 
@@ -523,18 +557,13 @@ def export_excel(scenarios: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-def export_study() -> bytes:
-    data = {k: st.session_state.get(k) for k in STUDY_KEYS}
-    return json.dumps(data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-
-
-# ── Barre latérale : mode d'emploi, sauvegarde, nouvelle étude ─────────────
+# ── Barre latérale : mode d'emploi, exemple, nouvelle étude ─────────────
 
 with st.sidebar:
     st.header("🧭 Mode d'emploi")
     st.markdown(
         "1. **Cadrage** : renseignez au minimum le nom et le périmètre (le reste améliore la qualité). "
-        "Pour découvrir l'outil, chargez l'exemple ci-dessous.\n"
+        "Téléchargez l'exemple ci-dessous pour voir le niveau de détail attendu.\n"
         "2. **Socle** : lisez la synthèse de l'IA et notez les points à clarifier avec le client.\n"
         "3. **Chemins d'attaque** : corrigez si besoin, puis **validez** ou **rejetez** chacun "
         "(en choisissant un motif). Ajoutez ceux que l'IA a oubliés avec « ➕ Ajouter ».\n"
@@ -542,29 +571,16 @@ with st.sidebar:
         "puis **exportez** vers Excel."
     )
     st.divider()
-    st.subheader("💾 Étude")
-    if st.session_state.nom:
-        st.download_button(
-            "Sauvegarder l'étude (.json)", data=export_study(),
-            file_name=f"etude_EBIOS_{st.session_state.nom.replace(' ', '_')}.json",
-            mime="application/json", width="stretch",
-        )
-    up = st.file_uploader("Reprendre une étude sauvegardée", type="json")
-    if up is not None and st.button("Charger ce fichier", width="stretch"):
-        try:
-            reset_state(json.loads(up.getvalue().decode("utf-8")))
-            st.rerun()
-        except (ValueError, UnicodeDecodeError) as e:
-            st.error(f"Fichier illisible : {e}")
-    if st.button("📝 Charger l'exemple fictif", width="stretch"):
-        reset_state()
-        for k, v in EXEMPLE.items():
-            st.session_state[k] = v
-        st.rerun()
+    st.download_button(
+        "📄 Télécharger un exemple de cadrage (Word)", data=exemple_word(),
+        file_name="Exemple_cadrage_EBIOS_RM.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        width="stretch",
+    )
     if st.button("🗑️ Nouvelle étude (tout effacer)", width="stretch"):
         st.session_state["confirm_reset"] = True
     if st.session_state.get("confirm_reset"):
-        st.warning("Toutes les données non sauvegardées seront perdues.")
+        st.warning("Toutes les données de l'étude en cours seront perdues.")
         c1, c2 = st.columns(2)
         if c1.button("Confirmer", type="primary"):
             reset_state()
