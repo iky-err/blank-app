@@ -40,7 +40,7 @@ MAT_DIMS = [
     ("conf", "Conformité & Audit"),
 ]
 MAT_LABELS = {1: "Initial", 2: "Répété", 3: "Défini", 4: "Géré", 5: "Optimisé"}
-NB_CHEMINS_OPTIONS = [5, 7, 10, 12, 15]
+NB_CHEMINS_MIN, NB_CHEMINS_MAX = 1, 20  # au-delà de 20, la réponse de l'IA risque d'être coupée
 BATCH_SIZE = 4  # chemins traités par appel, pour éviter les réponses JSON tronquées
 STATUS_LABELS = {"pending": "🟡 En attente", "validated": "🟢 Validé", "rejected": "🔴 Rejeté"}
 AUTRE = "Autre (saisie libre)…"
@@ -99,7 +99,11 @@ EXEMPLE = [
      "Veille, alertes sectorielles, retours du client."),
     ("Maturité SSI (5 curseurs, 1 à 5)", "Gouvernance 2 ; Risques 2 ; Protection technique 3 ; Incidents 2 ; Conformité 3",
      "1 = Initial, 3 = Défini, 5 = Optimisé."),
-    ("Nombre de chemins d'attaque à proposer", "7", "Entre 5 et 15 ; au moins un par scénario de référence."),
+    ("Informations supplémentaires à ajouter",
+     "La DSI est externalisée à 80 % ; ouverture d'une filiale au Sénégal prévue en 2027.",
+     "Tout élément utile qui n'entre dans aucun autre champ : il est transmis à l'IA."),
+    ("Nombre de scénarios à générer", "7",
+     "Saisie libre de 1 à 20 ; l'IA en propose au moins un par scénario de référence."),
 ]
 
 
@@ -296,17 +300,28 @@ Incidents passés: {m['incidents'] or 'Aucun signalé'}
 Parties prenantes de l'écosystème: {m['prestataires'] or '?'}
 Projets récents: {m['projets_recents'] or '?'}
 Maturité SSI (indicateur complémentaire, hors EBIOS RM): {mat_str}
-Notes consultant: {m['notes'] or 'Aucune'}"""
+Informations supplémentaires du consultant: {m['notes'] or 'Aucune'}"""
+
+
+def wkey(key: str, value) -> str:
+    """Initialise la valeur d'un widget une seule fois, puis laisse Streamlit la gérer.
+
+    On ne passe jamais value= / index= à un widget qui a une key : sinon, selon la version de
+    Streamlit, le widget peut être recréé à chaque exécution et « se bloquer » pendant la saisie.
+    """
+    if key not in st.session_state:
+        st.session_state[key] = value
+    return key
 
 
 def choix_ou_saisie(container, label: str, options: list[str], current: str, key: str) -> str:
     """Liste déroulante avec une option « Autre » qui ouvre un champ de saisie libre."""
     opts = options + [AUTRE]
     hors_liste = current not in options
-    choix = container.selectbox(label, opts, index=opts.index(AUTRE) if hors_liste else opts.index(current), key=f"{key}_sel")
+    choix = container.selectbox(label, opts, key=wkey(f"{key}_sel", AUTRE if hors_liste else current))
     if choix != AUTRE:
         return choix
-    libre = container.text_input(f"{label} — précisez", value=current if hors_liste else "", key=f"{key}_txt")
+    libre = container.text_input(f"{label} — précisez", key=wkey(f"{key}_txt", current if hors_liste else ""))
     if not libre.strip():
         container.caption("Saisissez une valeur : en attendant, la valeur précédente est conservée.")
         return current
@@ -439,7 +454,7 @@ def generate_paths() -> None:
     m = st.session_state
     met = m["metrics"]
     refs = get_refs()
-    n = max(m["nb_chemins"], len(refs))
+    n = max(int(m["nb_chemins"]), len(refs))
     raw = call_ia(
         SYSTEM_PATHS,
         f"Propose {n} chemins d'attaque stratégiques (au minimum un par scénario de référence).\n\n"
@@ -752,11 +767,23 @@ if st.session_state.step == 1:
     for k, label in MAT_DIMS:
         st.slider(label, 1, 5, key=f"mat_{k}")
 
-    st.selectbox(
-        "Nombre de chemins d'attaque à proposer", NB_CHEMINS_OPTIONS, key="nb_chemins",
-        help="Un scénario opérationnel sera généré par chemin que vous validerez.",
+    st.number_input(
+        f"Nombre de scénarios à générer ({NB_CHEMINS_MIN} à {NB_CHEMINS_MAX})",
+        min_value=NB_CHEMINS_MIN, max_value=NB_CHEMINS_MAX, step=1, key="nb_chemins",
+        help="Nombre de chemins d'attaque (scénarios stratégiques) que l'IA proposera à l'étape 3. "
+             "Un scénario opérationnel est ensuite généré pour chaque chemin que vous validez.",
     )
-    st.text_input("Notes du consultant", key="notes")
+    nb_refs = len(get_refs())
+    if nb_refs > st.session_state.nb_chemins:
+        st.caption(f"ℹ️ {nb_refs} scénarios de référence sont sélectionnés : l'IA proposera au moins "
+                   f"{nb_refs} chemins (un par scénario de référence).")
+    st.text_area(
+        "Informations supplémentaires à ajouter", key="notes", height=80,
+        placeholder="ex: le client prévoit une ouverture à l'international en 2027 ; la DSI est externalisée à 80 % ; "
+                    "l'audit ISO 27001 de l'an dernier a relevé des faiblesses sur la gestion des accès…",
+        help="Tout élément utile qui n'entre dans aucun autre champ. Ces informations sont transmises à l'IA "
+             "et prises en compte dans l'analyse et dans les propositions de chemins et de scénarios.",
+    )
 
     vides = [n for n, v in (("valeurs métier", st.session_state.valeurs_metier),
                             ("biens supports", st.session_state.biens_supports),
@@ -873,15 +900,15 @@ elif st.session_state.step == 3:
             c1, c2 = st.columns(2)
             p["source_risque"] = choix_ou_saisie(c1, "Source de risque", SOURCES_RISQUE, p["source_risque"], key=f"sr_{pid}")
             p["objectif_vise"] = choix_ou_saisie(c2, "Objectif visé", OBJECTIFS_VISES, p["objectif_vise"], key=f"ov_{pid}")
-            p["partie_prenante"] = c1.text_input("Partie prenante de l'écosystème", p["partie_prenante"], key=f"pp_{pid}")
-            p["valeur_metier"] = c2.text_input("Valeur métier", p["valeur_metier"], key=f"vm_{pid}")
-            p["evenement_redoute"] = c1.text_input("Événement redouté", p["evenement_redoute"], key=f"er_{pid}")
-            p["gravite"] = c2.selectbox("Gravité", NIVEAUX_GRAVITE, index=NIVEAUX_GRAVITE.index(p["gravite"]), key=f"gr_{pid}")
-            p["chemin"] = st.text_area("Chemin d'attaque", p["chemin"], key=f"ch_{pid}")
+            p["partie_prenante"] = c1.text_input("Partie prenante de l'écosystème", key=wkey(f"pp_{pid}", p["partie_prenante"]))
+            p["valeur_metier"] = c2.text_input("Valeur métier", key=wkey(f"vm_{pid}", p["valeur_metier"]))
+            p["evenement_redoute"] = c1.text_input("Événement redouté", key=wkey(f"er_{pid}", p["evenement_redoute"]))
+            p["gravite"] = c2.selectbox("Gravité", NIVEAUX_GRAVITE, key=wkey(f"gr_{pid}", p["gravite"]))
+            p["chemin"] = st.text_area("Chemin d'attaque", key=wkey(f"ch_{pid}", p["chemin"]))
             cur_ref = p.get("ref_type", "") if p.get("ref_type", "") in ref_ids else ""
             p["ref_type"] = st.selectbox(
-                "Scénario de référence associé", ref_ids, index=ref_ids.index(cur_ref),
-                format_func=lambda x: ref_lbl[x], key=f"rf_{pid}",
+                "Scénario de référence associé", ref_ids,
+                format_func=lambda x: ref_lbl[x], key=wkey(f"rf_{pid}", cur_ref),
             )
             if p.get("justification"):
                 st.caption(f"Justification : {p['justification']}")
@@ -1072,25 +1099,25 @@ elif st.session_state.step == 4:
             if edit:
                 st.caption("Source, objectif, partie prenante, valeur métier, événement redouté et gravité "
                            "se corrigent à l'étape 3 (chemin d'attaque).")
-                s["titre"] = st.text_input("Titre", s["titre"], key=f"ti_{sid}")
+                s["titre"] = st.text_input("Titre", key=wkey(f"ti_{sid}", s["titre"]))
                 e1, e2 = st.columns(2)
-                s["actif"] = e1.text_input("Bien support ciblé", s["actif"], key=f"ac_{sid}")
-                s["vuln"] = e2.text_input("Vulnérabilité exploitée", s["vuln"], key=f"vu_{sid}")
+                s["actif"] = e1.text_input("Bien support ciblé", key=wkey(f"ac_{sid}", s["actif"]))
+                s["vuln"] = e2.text_input("Vulnérabilité exploitée", key=wkey(f"vu_{sid}", s["vuln"]))
                 s["vraisemblance"] = e1.selectbox(
                     "Vraisemblance", NIVEAUX_VRAISEMBLANCE,
-                    index=NIVEAUX_VRAISEMBLANCE.index(s["vraisemblance"]), key=f"vr_{sid}",
+                    key=wkey(f"vr_{sid}", s["vraisemblance"]),
                 )
                 s["score"] = score_scenario(s["vraisemblance"], s["gravite"])
                 e2.metric("Niveau de risque recalculé", f"{s['score']}/{MAX_SCORE}")
                 s["mode_operatoire"] = _pipe(st.text_area(
-                    "Mode opératoire (une phase par ligne)", s["mode_operatoire"].replace(" | ", "\n"),
-                    key=f"mo_{sid}", height=140,
+                    "Mode opératoire (une phase par ligne)",
+                    key=wkey(f"mo_{sid}", s["mode_operatoire"].replace(" | ", "\n")), height=140,
                 ))
-                s["impact_op"] = st.text_area("Impact opérationnel", s["impact_op"], key=f"io_{sid}")
-                s["impact_fin"] = st.text_area("Impact financier", s["impact_fin"], key=f"if_{sid}")
-                s["impact_reg"] = st.text_area("Impact juridique / réglementaire", s["impact_reg"], key=f"ir_{sid}")
+                s["impact_op"] = st.text_area("Impact opérationnel", key=wkey(f"io_{sid}", s["impact_op"]))
+                s["impact_fin"] = st.text_area("Impact financier", key=wkey(f"if_{sid}", s["impact_fin"]))
+                s["impact_reg"] = st.text_area("Impact juridique / réglementaire", key=wkey(f"ir_{sid}", s["impact_reg"]))
                 s["reco"] = _pipe(st.text_area(
-                    "Mesures de sécurité (une par ligne)", s["reco"].replace(" | ", "\n"), key=f"re_{sid}", height=120,
+                    "Mesures de sécurité (une par ligne)", key=wkey(f"re_{sid}", s["reco"].replace(" | ", "\n")), height=120,
                 ))
                 if is_modified(s, SCEN_EDITABLE) and st.button("↶ Revenir à la proposition de l'IA", key=f"undo_{sid}"):
                     for f in SCEN_EDITABLE:
