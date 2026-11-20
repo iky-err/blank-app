@@ -1,5 +1,8 @@
+import copy
+import hmac
 import io
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -147,7 +150,7 @@ defaults = {
     "incidents": "", "menaces": "",
     "equipe_it": "", "equipe_sec": "", "prestataires": "", "projets_recents": "",
     "notes": "",
-    "maturite": {k: 2 for k, _ in MAT_DIMS},
+    **{f"mat_{k}": 2 for k, _ in MAT_DIMS},
     "nb_chemins": 7,
     "analysis": None,
     "paths": None,
@@ -157,8 +160,19 @@ defaults = {
     "flash": "",
 }
 for k, v in defaults.items():
-    st.session_state.setdefault(k, v)
+    st.session_state.setdefault(k, copy.deepcopy(v))
 st.session_state.setdefault("metrics", _new_metrics())
+
+# Champs de l'étape 1 liés directement à leur widget (key=...). Streamlit efface l'état d'un widget
+# qui n'est plus affiché : on le réécrit à chaque exécution pour conserver la saisie aux étapes 2 à 4.
+STEP1_KEYS = [
+    "nom", "taille", "secteur", "secteur_autre", "perimetre", "valeurs_metier", "biens_supports",
+    "evenements_redoutes", "sources_risque", "scenarios_ref", "scenarios_ref_autre", "reglements",
+    "reglement_autre", "equipe_it", "equipe_sec", "prestataires", "projets_recents", "incidents",
+    "menaces", "nb_chemins", "notes", *(f"mat_{k}" for k, _ in MAT_DIMS),
+]
+for k in STEP1_KEYS:
+    st.session_state[k] = st.session_state[k]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -179,6 +193,36 @@ def is_modified(item: dict, fields: list[str]) -> bool:
     return any(_norm(item.get(f)) != _norm(orig.get(f)) for f in fields)
 
 
+# Clés des widgets de correction (préfixe de key -> champ), pour relire une saisie dès le début
+# de l'exécution : en-têtes, couverture et compteurs sont ainsi à jour sans clic supplémentaire.
+PATH_WIDGETS = {"pp": "partie_prenante", "vm": "valeur_metier", "er": "evenement_redoute",
+                "gr": "gravite", "ch": "chemin", "rf": "ref_type"}
+SCEN_WIDGETS = {"ti": "titre", "ac": "actif", "vu": "vuln", "vr": "vraisemblance", "mo": "mode_operatoire",
+                "io": "impact_op", "if": "impact_fin", "ir": "impact_reg", "re": "reco"}
+
+
+def sync_path(p: dict) -> None:
+    ss, pid = st.session_state, p["id"]
+    for pref, field in PATH_WIDGETS.items():
+        if f"{pref}_{pid}" in ss:
+            p[field] = ss[f"{pref}_{pid}"]
+    for pref, field in (("sr", "source_risque"), ("ov", "objectif_vise")):
+        choix = ss.get(f"{pref}_{pid}_sel")
+        if choix and choix != AUTRE:
+            p[field] = choix
+        elif choix == AUTRE and str(ss.get(f"{pref}_{pid}_txt", "")).strip():
+            p[field] = ss[f"{pref}_{pid}_txt"].strip()
+
+
+def sync_scenario(s: dict) -> None:
+    ss, sid = st.session_state, s["id"]
+    for pref, field in SCEN_WIDGETS.items():
+        if f"{pref}_{sid}" in ss:
+            v = ss[f"{pref}_{sid}"]
+            s[field] = _pipe(v) if field in ("mode_operatoire", "reco") else v
+    s["score"] = score_scenario(s["vraisemblance"], s["gravite"])
+
+
 def fmt_duree(sec) -> str:
     if sec is None:
         return "—"
@@ -193,8 +237,13 @@ def reset_state() -> None:
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     for k, v in defaults.items():
-        st.session_state[k] = v
+        st.session_state[k] = copy.deepcopy(v)
     st.session_state["metrics"] = _new_metrics()
+
+
+def nom_fichier(nom: str) -> str:
+    """Nom de fichier sûr (sans / \\ : * ? etc.) à partir du nom du client."""
+    return re.sub(r"[^\w\-]+", "_", nom).strip("_") or "etude"
 
 
 def call_ia(system: str, user: str):
@@ -229,7 +278,7 @@ def get_refs() -> list[dict]:
 def build_context() -> str:
     m = st.session_state
     mat_str = ", ".join(
-        f"{label}: {m['maturite'][k]}/5 ({MAT_LABELS[m['maturite'][k]]})"
+        f"{label}: {m[f'mat_{k}']}/5 ({MAT_LABELS[m[f'mat_{k}']]})"
         for k, label in MAT_DIMS
     )
     regs = list(m["reglements"]) + ([m["reglement_autre"]] if m["reglement_autre"] else [])
@@ -531,9 +580,10 @@ def export_excel(scenarios: list[dict]) -> bytes:
         }
         pdf = pdf[[c for c in pcols if c in pdf.columns]].rename(columns=pcols)
 
-    # Empêche l'injection de formules : une cellule commençant par = + - @ serait interprétée par Excel.
+    # Empêche l'injection de formules (OWASP CSV/Excel injection) : une cellule commençant par
+    # = + - @ (ou tabulation / retour chariot) serait interprétée par Excel.
     def _safe(v):
-        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
+        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
             return "'" + v
         return v
 
@@ -604,7 +654,8 @@ if st.query_params.get("admin") == "1":
             attendu = ""
         if not attendu:
             st.caption("Définissez ADMIN_PASSWORD dans les secrets de l'application.")
-        if mdp and attendu and mdp == attendu:
+        # compare_digest : comparaison en temps constant (pas de fuite d'information par le temps de réponse).
+        if mdp and attendu and hmac.compare_digest(mdp.encode("utf-8"), attendu.encode("utf-8")):
             if os.path.exists(INDIC_FILE):
                 with open(INDIC_FILE, "rb") as f:
                     st.download_button("⬇️ Télécharger indicateurs_ebios.csv", f.read(),
@@ -641,88 +692,71 @@ if st.session_state.step == 1:
     st.caption("Les champs marqués * sont obligatoires. Plus le cadrage est précis (valeurs métier, biens "
                "supports, événements redoutés, parties prenantes), moins vous aurez de propositions à corriger.")
 
+    # Chaque widget est lié à sa clé de session (key=...) : plus de valeur par défaut réinjectée
+    # à chaque exécution, donc plus de liste déroulante qui se referme après chaque sélection.
     c1, c2 = st.columns(2)
-    st.session_state.nom = c1.text_input("Nom de l'organisation *", st.session_state.nom)
-    st.session_state.taille = c2.selectbox("Taille", TAILLES, index=TAILLES.index(st.session_state.taille))
-    st.session_state.secteur = st.selectbox("Secteur d'activité", SECTEURS, index=SECTEURS.index(st.session_state.secteur))
+    c1.text_input("Nom de l'organisation *", key="nom")
+    c2.selectbox("Taille", TAILLES, key="taille")
+    st.selectbox("Secteur d'activité", SECTEURS, key="secteur")
     if st.session_state.secteur == "Autre":
-        st.session_state.secteur_autre = st.text_input("Précisez le secteur *", st.session_state.secteur_autre)
-    st.session_state.perimetre = st.text_area(
-        "Périmètre de l'étude (métier et technique) *",
-        st.session_state.perimetre,
+        st.text_input("Précisez le secteur *", key="secteur_autre")
+    st.text_area(
+        "Périmètre de l'étude (métier et technique) *", key="perimetre",
         placeholder="ex: activité de paiement et SI Finance, sites de Casablanca et Rabat…",
     )
-    st.session_state.valeurs_metier = st.text_area(
-        "Valeurs métier",
-        st.session_state.valeurs_metier,
+    st.text_area(
+        "Valeurs métier", key="valeurs_metier",
         placeholder="ex: Exécution des paiements, gestion des comptes clients, reporting financier réglementaire…",
         help="Processus et informations essentiels à l'organisation.",
     )
-    st.session_state.biens_supports = st.text_area(
-        "Biens supports",
-        st.session_state.biens_supports,
+    st.text_area(
+        "Biens supports", key="biens_supports",
         placeholder="ex: ERP Finance → exécution des paiements ; base de données clients → gestion des comptes ; équipe trésorerie…",
         help="Composants sur lesquels reposent les valeurs métier : systèmes, logiciels, réseaux, personnes, "
              "locaux, prestataires. Indiquez si possible la valeur métier soutenue (bien support → valeur métier).",
     )
-    st.session_state.evenements_redoutes = st.text_area(
-        "Événements redoutés (avec gravité si connue)",
-        st.session_state.evenements_redoutes,
+    st.text_area(
+        "Événements redoutés (avec gravité si connue)", key="evenements_redoutes",
         placeholder="ex: Détournement de virements — Critique ; indisponibilité du SI Finance > 24 h — Grave",
     )
 
     st.markdown("**Cadrage EBIOS RM**")
-    st.session_state.sources_risque = st.multiselect(
-        "Sources de risque pressenties (facultatif)",
-        SOURCES_RISQUE,
-        default=st.session_state.sources_risque,
+    st.multiselect(
+        "Sources de risque pressenties (facultatif)", SOURCES_RISQUE, key="sources_risque",
         help="Typologie indicative inspirée du guide ANSSI. Laissez vide pour laisser le modèle proposer les sources plausibles.",
     )
-    st.session_state.scenarios_ref = st.multiselect(
-        "Scénarios de référence à couvrir",
-        list(SCENARIOS_REFERENCE),
-        default=st.session_state.scenarios_ref,
+    st.multiselect(
+        "Scénarios de référence à couvrir", list(SCENARIOS_REFERENCE), key="scenarios_ref",
         format_func=lambda rid: SCENARIOS_REFERENCE[rid]["label"],
         help="Chaque scénario coché donnera lieu à au moins un chemin d'attaque proposé, puis à un scénario.",
     )
-    st.session_state.scenarios_ref_autre = st.text_area(
-        "Autres scénarios de référence (un par ligne)",
-        st.session_state.scenarios_ref_autre,
-        height=80,
-    )
+    st.text_area("Autres scénarios de référence (un par ligne)", key="scenarios_ref_autre", height=80)
 
     st.markdown("**Socle de sécurité**")
-    st.session_state.reglements = st.multiselect(
-        "Référentiels et réglementations applicables",
-        REGLEMENTS,
-        default=[r for r in st.session_state.reglements if r in REGLEMENTS],
-    )
-    st.session_state.reglement_autre = st.text_input("Autres obligations spécifiques", st.session_state.reglement_autre)
+    st.multiselect("Référentiels et réglementations applicables", REGLEMENTS, key="reglements")
+    st.text_input("Autres obligations spécifiques", key="reglement_autre")
 
     c1, c2 = st.columns(2)
-    st.session_state.equipe_it = c1.text_input("Effectif équipe IT", st.session_state.equipe_it)
-    st.session_state.equipe_sec = c2.text_input("Effectif équipe sécurité", st.session_state.equipe_sec)
-    st.session_state.prestataires = st.text_input(
-        "Parties prenantes de l'écosystème",
-        st.session_state.prestataires,
+    c1.text_input("Effectif équipe IT", key="equipe_it")
+    c2.text_input("Effectif équipe sécurité", key="equipe_sec")
+    st.text_input(
+        "Parties prenantes de l'écosystème", key="prestataires",
         placeholder="ex: prestataire d'infogérance, éditeur de l'ERP, partenaires bancaires, filiales, clients…",
     )
-    st.session_state.projets_recents = st.text_input("Projets SI en cours ou récents", st.session_state.projets_recents)
+    st.text_input("Projets SI en cours ou récents", key="projets_recents")
 
-    st.session_state.incidents = st.text_area("Incidents de sécurité passés", st.session_state.incidents)
-    st.session_state.menaces = st.text_area("État de la menace connu (veille, alertes sectorielles)", st.session_state.menaces)
+    st.text_area("Incidents de sécurité passés", key="incidents")
+    st.text_area("État de la menace connu (veille, alertes sectorielles)", key="menaces")
 
     st.markdown("**Maturité SSI** (1 = Initial → 5 = Optimisé) — indicateur complémentaire Formind, hors méthode EBIOS RM")
     for k, label in MAT_DIMS:
-        st.session_state.maturite[k] = st.slider(label, 1, 5, st.session_state.maturite[k])
+        st.slider(label, 1, 5, key=f"mat_{k}")
 
-    st.session_state.nb_chemins = st.selectbox(
-        "Nombre de chemins d'attaque à proposer",
-        NB_CHEMINS_OPTIONS,
-        index=NB_CHEMINS_OPTIONS.index(st.session_state.nb_chemins),
+    st.selectbox(
+        "Nombre de chemins d'attaque à proposer", NB_CHEMINS_OPTIONS, key="nb_chemins",
         help="Un scénario opérationnel sera généré par chemin que vous validerez.",
     )
-    st.session_state.notes = st.text_input("Notes du consultant", st.session_state.notes)
+    st.text_input("Notes du consultant", key="notes")
 
     vides = [n for n, v in (("valeurs métier", st.session_state.valeurs_metier),
                             ("biens supports", st.session_state.biens_supports),
@@ -804,6 +838,8 @@ elif st.session_state.step == 3:
     refs = get_refs()
     ref_ids = [""] + [r["id"] for r in refs]
     ref_lbl = {"": "— Aucun (hors référentiel)", **{r["id"]: r["label"] for r in refs}}
+    for p in paths:
+        sync_path(p)
 
     st.subheader(f"🧭 Ateliers 2 et 3 — Scénarios stratégiques — {st.session_state.nom}")
     st.caption(
@@ -853,6 +889,17 @@ elif st.session_state.step == 3:
                 st.caption(f"Note du consultant : {p['_motif_ajout']}")
             for msg in warnings_path(p):
                 st.warning(msg, icon="⚠️")
+            if is_modified(p, PATH_EDITABLE):
+                lbl_undo = ("↶ Revenir à la saisie initiale" if p.get("_origine") == "manuel"
+                            else "↶ Revenir à la proposition de l'IA")
+                if st.button(lbl_undo, key=f"pundo_{pid}"):
+                    for f in PATH_EDITABLE:
+                        p[f] = p["_orig"][f]
+                    for wk in (*PATH_WIDGETS, "sr", "ov"):
+                        st.session_state.pop(f"{wk}_{pid}", None)
+                        st.session_state.pop(f"{wk}_{pid}_sel", None)
+                        st.session_state.pop(f"{wk}_{pid}_txt", None)
+                    st.rerun()
 
             b1, b2, b3, b4 = st.columns([1, 2, 1, 1])
             if b1.button("✓ Valider", key=f"pval_{pid}"):
@@ -938,6 +985,8 @@ elif st.session_state.step == 4:
     by_path = {p["id"]: p for p in (st.session_state.paths or [])}
     ref_lbl = {r["id"]: r["label"] for r in get_refs()}
     sstatus = st.session_state.scen_status
+    for s in scenarios:
+        sync_scenario(s)
 
     st.subheader(f"🛡 Atelier 4 — Scénarios opérationnels — {st.session_state.nom}")
     st.caption(
@@ -985,7 +1034,7 @@ elif st.session_state.step == 4:
         c2.download_button(
             "↓ Exporter Excel (scénarios, chemins, couverture)",
             data=export_excel(scenarios),
-            file_name=f"EBIOS_RM_{st.session_state.nom.replace(' ', '_')}.xlsx",
+            file_name=f"EBIOS_RM_{nom_fichier(st.session_state.nom)}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )

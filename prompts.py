@@ -244,6 +244,10 @@ def normalize_choice(value, options, aliases=None):
     for alias, target in (aliases or {}).items():
         if _key(alias) == k:
             return target
+    # Correspondance par préfixe (« Grave (impact fort) » -> « Grave »), seulement si la saisie est
+    # assez longue : une valeur tronquée comme « G » ou « S » ne doit pas être devinée.
+    if len(k) < 4:
+        return None
     for opt in options:
         ok = _key(opt)
         if k.startswith(ok) or ok.startswith(k):
@@ -351,7 +355,7 @@ def warnings_scenario(s) -> list[str]:
     w = []
     steps = [e.strip() for e in str(s["mode_operatoire"]).split("|") if e.strip()]
     attendu = PHASES_NON_INTENT if s.get("objectif_vise") == "Non intentionnel" else PHASES
-    if len(steps) != 4 or not all(_key(st).startswith(_key(ph)) for st, ph in zip(steps, attendu)):
+    if len(steps) != 4 or not all(_key(etape).startswith(_key(ph)) for etape, ph in zip(steps, attendu)):
         w.append("Mode opératoire : les 4 phases attendues ne sont pas respectées.")
     n = len([r for r in str(s["reco"]).split("|") if r.strip()])
     if not 3 <= n <= 4:
