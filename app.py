@@ -66,19 +66,20 @@ INDIC_FILE = os.environ.get(
 # Exemple FICTIF de cadrage (aucun client réel), téléchargeable en Word comme modèle de saisie.
 # (libellé du champ dans l'outil, exemple de réponse, conseil de saisie)
 EXEMPLE = [
-    ("Nom de l'organisation *", "PayNova (exemple fictif)", "Nom du client tel qu'il apparaîtra dans l'export."),
+    ("Code de l'étude *", "ETU-2026-014",
+     "Code neutre, sans nom de client ni initiales. La correspondance code / client reste dans le dossier de mission, hors de l'outil."),
     ("Taille", "PME (50-500 sal.)", "Choisir dans la liste."),
     ("Secteur d'activité", "Finance / Banque", "Choisir « Autre » et préciser si le secteur n'est pas listé."),
     ("Périmètre de l'étude (métier et technique) *",
-     "Activité d'émission de paiements mobiles et SI Finance associé, siège de Casablanca.",
-     "Indiquer l'activité étudiée ET le SI concerné, avec les sites si utile."),
+     "Activité d'émission de paiements mobiles et SI Finance associé, siège social.",
+     "Indiquer l'activité étudiée ET le SI concerné, sans nom de site, de produit ni de client."),
     ("Valeurs métier",
-     "Exécution des paiements clients ; gestion des comptes de paiement ; reporting réglementaire à Bank Al-Maghrib.",
+     "Exécution des paiements clients ; gestion des comptes de paiement ; reporting réglementaire au régulateur bancaire.",
      "Processus ou informations essentiels, séparés par des points-virgules."),
     ("Biens supports",
      "Plateforme de paiement (cloud) → exécution des paiements ; base clients → gestion des comptes ; "
-     "ERP Finance → reporting ; messagerie Microsoft 365 ; équipe trésorerie ; prestataire d'infogérance.",
-     "Format conseillé « bien support → valeur métier soutenue »."),
+     "ERP Finance → reporting ; messagerie cloud ; équipe trésorerie ; prestataire d'infogérance.",
+     "Format conseillé « bien support → valeur métier soutenue ». Catégories génériques : pas de nom de produit, de serveur ni d'adresse IP."),
     ("Événements redoutés (avec gravité si connue)",
      "Détournement de fonds — Critique ; indisponibilité de la plateforme > 24 h — Grave ; fuite de données clients — Grave.",
      "Ajouter la gravité (Mineure, Significative, Grave, Critique) : elle sera reprise dans les chemins."),
@@ -91,7 +92,7 @@ EXEMPLE = [
     ("Effectif équipe IT / équipe sécurité", "12 / 2", "Nombre de personnes (internes et externes dédiées)."),
     ("Parties prenantes de l'écosystème",
      "Infogérant (administration des serveurs), éditeur de l'ERP, banque partenaire, agrégateur SMS.",
-     "Préciser leur rôle ou leurs accès : l'IA s'en sert comme vecteurs d'attaque."),
+     "Préciser leur rôle ou leurs accès, sans les nommer : l'IA s'en sert comme vecteurs d'attaque."),
     ("Projets SI en cours ou récents", "Migration de la plateforme vers le cloud (en cours).", ""),
     ("Incidents de sécurité passés",
      "Tentative de fraude au président par e-mail en 2025, détectée par la trésorerie.", "Écrire « Aucun » s'il n'y en a pas."),
@@ -115,7 +116,8 @@ def exemple_word() -> bytes:
     doc.add_heading("Outil EBIOS RM — Exemple de cadrage (Atelier 1)", level=1)
     p = doc.add_paragraph(
         "Cet exemple est FICTIF. Il montre le niveau de détail attendu pour chaque champ de l'étape 1. "
-        "Saisissez dans l'outil les informations réelles de votre client : l'IA n'analyse que ce que vous saisissez."
+        "Saisissez dans l'outil les informations de votre client sous forme ANONYMISÉE : un code d'étude au lieu "
+        "du nom, des rôles et catégories au lieu des noms de personnes, de sociétés, de produits ou de serveurs."
     )
     p.runs[0].italic = True
     doc.add_paragraph("Les champs marqués * sont obligatoires ; les autres améliorent fortement la qualité des propositions.")
@@ -246,7 +248,7 @@ def reset_state() -> None:
 
 
 def nom_fichier(nom: str) -> str:
-    """Nom de fichier sûr (sans / \\ : * ? etc.) à partir du nom du client."""
+    """Nom de fichier sûr (sans / \\ : * ? etc.) à partir du code de l'étude."""
     return re.sub(r"[^\w\-]+", "_", nom).strip("_") or "etude"
 
 
@@ -286,7 +288,8 @@ def build_context() -> str:
         for k, label in MAT_DIMS
     )
     regs = list(m["reglements"]) + ([m["reglement_autre"]] if m["reglement_autre"] else [])
-    return f"""Organisation: {m['nom']}
+    # Le code de l'étude n'est volontairement PAS transmis à l'IA : il n'apporte rien à l'analyse.
+    return f"""Organisation: l'organisation étudiée (données anonymisées)
 Secteur: {m['secteur_autre'] if m['secteur'] == 'Autre' else m['secteur']} | Taille: {m['taille']}
 Périmètre de l'étude (métier et technique): {m['perimetre'] or 'Non précisé'}
 Valeurs métier: {m['valeurs_metier'] or 'Non précisées'}
@@ -412,7 +415,7 @@ def save_indicators() -> None:
         mn = lambda sec: round(sec / 60, 1) if sec is not None else None
         row = {
             "id_etude": met.get("id_etude"), "date_debut": met.get("date_debut"),
-            "organisation": m["nom"], "secteur": m["secteur_autre"] if m["secteur"] == "Autre" else m["secteur"],
+            "code_etude": m["nom"], "secteur": m["secteur_autre"] if m["secteur"] == "Autre" else m["secteur"],
             "duree_1re_liste_min": mn(k["duree_premiere_liste"]),
             "duree_1ers_scenarios_min": mn(k["duree_premiers_scenarios"]),
             "temps_ia_min": mn(k["temps_ia"]), "nb_appels_ia": k["nb_appels_ia"],
@@ -627,7 +630,8 @@ def export_excel(scenarios: list[dict]) -> bytes:
 with st.sidebar:
     st.header("🧭 Mode d'emploi")
     st.markdown(
-        "1. **Cadrage** : renseignez au minimum le nom et le périmètre (le reste améliore la qualité). "
+        "1. **Cadrage** : renseignez au minimum le code de l'étude et le périmètre (le reste améliore la qualité). "
+        "Toute la saisie doit être **anonymisée** : aucun nom de client, de personne, de produit ou de serveur. "
         "Téléchargez l'exemple ci-dessous pour voir le niveau de détail attendu.\n"
         "2. **Socle** : lisez la synthèse de l'IA et notez les points à clarifier avec le client.\n"
         "3. **Chemins d'attaque** : corrigez si besoin, puis **validez** ou **rejetez** chacun "
@@ -706,18 +710,25 @@ if st.session_state.step == 1:
     st.subheader("📋 Atelier 1 — Cadrage et socle de sécurité")
     st.caption("Les champs marqués * sont obligatoires. Plus le cadrage est précis (valeurs métier, biens "
                "supports, événements redoutés, parties prenantes), moins vous aurez de propositions à corriger.")
+    st.warning("Saisie anonymisée : aucun nom de client, de personne, de société, de produit, de serveur ni "
+               "d'adresse IP. Utilisez des rôles et des catégories (ex. « prestataire d'infogérance », « ERP Finance »).",
+               icon="🔒")
 
     # Chaque widget est lié à sa clé de session (key=...) : plus de valeur par défaut réinjectée
     # à chaque exécution, donc plus de liste déroulante qui se referme après chaque sélection.
     c1, c2 = st.columns(2)
-    c1.text_input("Nom de l'organisation *", key="nom")
+    c1.text_input(
+        "Code de l'étude *", key="nom", placeholder="ex: ETU-2026-014",
+        help="Code neutre, sans nom ni initiales du client. Il sert à nommer l'export et n'est pas transmis à l'IA. "
+             "Gardez la correspondance code / client dans le dossier de mission.",
+    )
     c2.selectbox("Taille", TAILLES, key="taille")
     st.selectbox("Secteur d'activité", SECTEURS, key="secteur")
     if st.session_state.secteur == "Autre":
         st.text_input("Précisez le secteur *", key="secteur_autre")
     st.text_area(
         "Périmètre de l'étude (métier et technique) *", key="perimetre",
-        placeholder="ex: activité de paiement et SI Finance, sites de Casablanca et Rabat…",
+        placeholder="ex: activité de paiement et SI Finance, siège et sites régionaux…",
     )
     st.text_area(
         "Valeurs métier", key="valeurs_metier",
@@ -794,7 +805,7 @@ if st.session_state.step == 1:
                 + ". L'outil fonctionne sans, mais les propositions seront plus génériques.")
 
     if st.button("✦ Analyser le socle de sécurité et passer à l'étape 2 →", type="primary", width="stretch"):
-        manquants = [n for n, v in (("le nom", st.session_state.nom), ("le périmètre", st.session_state.perimetre)) if not v.strip()]
+        manquants = [n for n, v in (("le code de l'étude", st.session_state.nom), ("le périmètre", st.session_state.perimetre)) if not v.strip()]
         if st.session_state.secteur == "Autre" and not st.session_state.secteur_autre.strip():
             manquants.append("le secteur")
         if manquants:
